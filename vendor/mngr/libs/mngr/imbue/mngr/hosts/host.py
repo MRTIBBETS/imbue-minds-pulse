@@ -22,17 +22,13 @@ from typing import assert_never
 from uuid import uuid4
 
 from loguru import logger
+from paramiko import Channel
 from paramiko import SSHException
 from paramiko import Transport
 from pydantic import Field
 from pydantic import ValidationError
 from pyinfra.api.command import StringCommand
 from pyinfra.connectors.util import CommandOutput
-from tenacity import retry
-from tenacity import retry_if_exception
-from tenacity import stop_after_attempt
-from tenacity import wait_chain
-from tenacity import wait_fixed
 
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.errors import ProcessTimeoutError
@@ -68,6 +64,8 @@ from imbue.mngr.hosts.file_upload import upload_files_in_bulk
 from imbue.mngr.hosts.offline_host import BaseHost
 from imbue.mngr.hosts.offline_host import apply_rename_to_agent_data
 from imbue.mngr.hosts.outer_host import OuterHost
+from imbue.mngr.hosts.outer_host import is_transient_ssh_error
+from imbue.mngr.hosts.outer_host import retry_on_transient_ssh_error
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -156,48 +154,6 @@ def _try_acquire_flock(lock_file: io.TextIOWrapper) -> bool:
         return True
     except BlockingIOError:
         return False
-
-
-@pure
-def _is_transient_ssh_error(exception: BaseException) -> bool:
-    """Check if the exception is a transient SSH connection error worth retrying.
-
-    Matches:
-    - OSError with "Socket is closed" (stale socket from pyinfra)
-    - SSHException (e.g. "SSH session not active" when transport dies),
-      including ChannelException (server refused to open a new channel,
-      e.g. MaxSessions limit -- the transport may still be alive)
-    - EOFError (remote end closed connection)
-    - TimeoutError (pyinfra read_output_buffers timeout when the remote
-      sshd is reloaded mid-command, e.g. during cloud-init bootstrap).
-      Note: ``TimeoutError`` is an OSError subclass on Python 3, so this
-      check must precede any narrower OSError handling.
-    """
-    if isinstance(exception, OSError) and "Socket is closed" in str(exception):
-        return True
-    if isinstance(exception, SSHException):
-        return True
-    if isinstance(exception, EOFError):
-        return True
-    if isinstance(exception, TimeoutError):
-        return True
-    return False
-
-
-# Shared retry decorator for file operations that encounter transient SSH
-# connection errors.  Retries after (0, 1, 3, 6) seconds for a total
-# backoff window of ~10 seconds.
-_retry_on_transient_ssh_error = retry(
-    retry=retry_if_exception(_is_transient_ssh_error),
-    stop=stop_after_attempt(5),
-    wait=wait_chain(
-        wait_fixed(0),
-        wait_fixed(1),
-        wait_fixed(3),
-        wait_fixed(6),
-    ),
-    reraise=True,
-)
 
 
 def _get_ssh_transport(pyinfra_host: Any) -> Transport | None:
@@ -869,25 +825,29 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         A long-lived exec channel opens the lock fd, waits for the lock, and then
         waits for stdin EOF. Closing the channel on exit sends that EOF, so the
         remote shell exits, the fd closes, and the lock releases.
+
+        Acquiring the channel retries transient SSH failures (rebuilding a dropped
+        connection) and, if they survive the retries, surfaces them as a
+        ``HostConnectionError`` instead of a raw paramiko ``SSHException``. This
+        keeps a single unreachable host from crashing a caller that operates on many
+        hosts at once (e.g. the mapreduce orchestrator launching one agent per task):
+        the failure is a structured ``MngrError`` it can catch and isolate per host.
         """
-        # Establish the SSH connection before grabbing the transport: it is opened
-        # lazily, and the lock can be the first thing to touch it (so the transport
-        # would otherwise be None). Mirrors every other transport user.
-        self._ensure_connected()
-        transport = self._get_paramiko_transport()
-        channel = transport.open_session()
-        is_lock_acquired = False
+        with (
+            self._notify_on_connection_error(),
+            self._translate_ssh_errors(
+                failed="Could not acquire host lock due to connection error",
+                closed="Connection was closed while acquiring host lock",
+            ),
+        ):
+            channel = self._open_remote_lock_channel(lock_file_path, timeout_seconds)
         try:
-            with log_span("acquiring host lock at {} (over SSH)", lock_file_path):
-                channel.exec_command(_build_remote_lock_command(lock_file_path, timeout_seconds))
-                _wait_for_remote_lock_acquired(channel)
-            is_lock_acquired = True
             yield
         except BaseException:
             # If an operation that held the lock fails, optionally keep the host
             # alive for debugging: launch a detached holder that re-grabs the flock
             # after our channel releases it (it blocks on flock until we release).
-            if is_lock_acquired and _is_retain_lock_for_debug_enabled():
+            if _is_retain_lock_for_debug_enabled():
                 logger.debug(
                     "Launching detached host-lock holder for debugging "
                     "(MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1)"
@@ -903,6 +863,52 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 logger.debug("Failed to send EOF when releasing remote host lock: {}", shutdown_error)
             channel.close()
             logger.trace("Released host lock (over SSH)")
+
+    @retry_on_transient_ssh_error
+    def _open_remote_lock_channel(self, lock_file_path: Path, timeout_seconds: float | None) -> Channel:
+        """Open an SSH channel that holds the remote host flock, retrying transient SSH failures.
+
+        Returns only once the lock has actually been acquired; the caller owns the
+        returned channel and releases the lock by closing it.
+
+        Mirrors ``_run_shell_command_with_transient_retry``: a dropped connection
+        leaves a dead transport whose ``open_session`` raises ``SSHException("SSH
+        session not active")`` on every subsequent call, so on a transient SSH error
+        we disconnect -- forcing the next attempt to rebuild the connection from
+        scratch -- and re-raise for the retry decorator. Failures that survive the
+        retries are translated to ``HostConnectionError`` by the caller's
+        ``_translate_ssh_errors``.
+        """
+        # Establish the SSH connection before grabbing the transport: it is opened
+        # lazily, and the lock can be the first thing to touch it (so the transport
+        # would otherwise be None). Mirrors every other transport user.
+        self._ensure_connected()
+        transport = self._get_paramiko_transport()
+        try:
+            channel = transport.open_session()
+        except (OSError, EOFError, SSHException) as e:
+            if is_transient_ssh_error(e):
+                logger.debug("Transient SSH error opening host-lock channel: {}, disconnecting for retry", e)
+                self.connector.host.disconnect()
+            raise
+        is_lock_acquired = False
+        try:
+            with log_span("acquiring host lock at {} (over SSH)", lock_file_path):
+                channel.exec_command(_build_remote_lock_command(lock_file_path, timeout_seconds))
+                _wait_for_remote_lock_acquired(channel)
+            is_lock_acquired = True
+        except (OSError, EOFError, SSHException) as e:
+            if is_transient_ssh_error(e):
+                logger.debug("Transient SSH error acquiring host lock: {}, disconnecting for retry", e)
+                self.connector.host.disconnect()
+            raise
+        finally:
+            # Close the half-open channel on any failure (transient SSH error, a
+            # bounded-wait LockNotHeldError, flock missing, ...) so we never leak it.
+            # The retry decorator or the caller sees the original exception.
+            if not is_lock_acquired:
+                channel.close()
+        return channel
 
     def _launch_detached_lock_holder(self, lock_file_path: Path) -> None:
         """Launch a detached on-host process that holds the host-lock flock indefinitely.
@@ -3359,7 +3365,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         (a stop) or log and proceed (a (re)start).
 
         This is the single mechanism that guarantees a long-lived daemon launched under
-        an agent (e.g. the FCT bootstrap's ``supervisord`` and its children, like a ttyd
+        an agent (e.g. the DEFAULT_WORKSPACE_TEMPLATE bootstrap's ``supervisord`` and its children, like a ttyd
         bound to a fixed port) cannot outlive the agent: the env marker is inherited by
         every descendant and survives reparenting, so it catches orphans that a
         pane/process-tree walk would miss.

@@ -34,7 +34,7 @@ from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
-from imbue.mngr.hosts.common import determine_lifecycle_state
+from imbue.mngr.hosts.common import determine_lifecycle_probe_result
 from imbue.mngr.hosts.common import resolve_expected_process_name
 from imbue.mngr.hosts.common import timestamp_to_datetime
 from imbue.mngr.hosts.host import Host
@@ -65,6 +65,7 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
 from imbue.mngr.interfaces.provider_instance import bounded_result_from_agents_by_host
+from imbue.mngr.interfaces.provider_instance import collect_cached_host_ssh_infos
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -1598,7 +1599,10 @@ class VpsProvider(BaseProviderInstance):
         reads to de-duplicate across polls.
         """
         agents_by_host = self.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
-        return bounded_result_from_agents_by_host(agents_by_host)
+        # Surface each running host's SSH endpoint (read from the host object the batch discovery
+        # just cached) so the streaming poller re-emits it as HOST_SSH_INFO for tunneling consumers.
+        host_ssh_infos = collect_cached_host_ssh_infos(self, agents_by_host.keys())
+        return bounded_result_from_agents_by_host(agents_by_host, host_ssh_infos=host_ssh_infos)
 
     def discover_hosts_and_agents(
         self,
@@ -2114,7 +2118,7 @@ class VpsProvider(BaseProviderInstance):
 
         expected_process_name = resolve_expected_process_name(agent_type, command, self.mngr_ctx.config)
         is_type_known = check_agent_type_known(agent_type, self.mngr_ctx.config)
-        state = determine_lifecycle_state(
+        lifecycle = determine_lifecycle_probe_result(
             tmux_info=agent_raw.get("tmux_info"),
             is_active=agent_raw.get("is_active", False),
             expected_process_name=expected_process_name,
@@ -2131,7 +2135,8 @@ class VpsProvider(BaseProviderInstance):
             initial_branch=agent_data.get("created_branch_name"),
             create_time=create_time,
             start_on_boot=agent_data.get("start_on_boot", False),
-            state=state,
+            state=lifecycle.state,
+            pid=lifecycle.pid,
             url=agent_raw.get("url"),
             start_time=start_time,
             runtime_seconds=runtime_seconds,

@@ -57,7 +57,7 @@ from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
-from imbue.mngr.hosts.common import determine_lifecycle_state
+from imbue.mngr.hosts.common import determine_lifecycle_probe_result
 from imbue.mngr.hosts.common import resolve_expected_process_name
 from imbue.mngr.hosts.common import timestamp_to_datetime
 from imbue.mngr.hosts.host import Host
@@ -106,6 +106,8 @@ from imbue.mngr.providers.ssh_utils import format_as_known_hosts_address
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr.providers.ssh_utils import save_ssh_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
+from imbue.mngr.utils.file_utils import atomic_write
+from imbue.mngr.utils.file_utils import read_json_dict
 from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.config import get_provider_data_dir
 from imbue.mngr_imbue_cloud.connector.auth_helper import get_active_token
@@ -176,8 +178,8 @@ def _rewrite_container_host_name(
 
     The pool host's ``/mngr/data.json`` was written at bake time with the
     bake's per-bake unique placeholder host name (``pool-<hex>-host``).
-    The FCT bootstrap reads that file to decide what to name the initial
-    chat agent (see ``forever-claude-template/libs/bootstrap/src/bootstrap/
+    The DEFAULT_WORKSPACE_TEMPLATE bootstrap reads that file to decide what to name the initial
+    chat agent (see ``default-workspace-template/libs/bootstrap/src/bootstrap/
     manager.py:_read_host_name``). Without this rewrite, every lease would
     end up with a chat agent named after the bake's placeholder instead
     of the user's chosen workspace name.
@@ -296,6 +298,73 @@ class ImbueCloudProvider(BaseProviderInstance):
 
     def _host_known_hosts_path(self, host_id: HostId) -> Path:
         return self._host_state_dir(host_id) / "known_hosts"
+
+    def _last_known_agents_path(self, host_id: HostId) -> Path:
+        return self._host_state_dir(host_id) / "last_known_agents.json"
+
+    # ------------------------------------------------------------------
+    # Sticky agent identity
+    #
+    # Discovery persists the identity (name + certified_data) of the agents
+    # seen in the last successful outer-listing pass, and re-attaches it in the
+    # fallback paths (outer SSH unreachable, or a successful pass with zero
+    # agents). Without this, a transiently-unreachable host emits a single
+    # label-less "husk" agent named by its lease id, and every consumer that
+    # filters on labels -- most importantly the minds forward's
+    # ``has(agent.labels.is_primary)`` -- silently drops the workspace, so it
+    # vanishes from the sidebar and 404s on restart. Persisting to disk (not
+    # just in-memory) lets the identity survive an app/forward relaunch into a
+    # flaky-network window, which is the production failure mode this fixes.
+    # ------------------------------------------------------------------
+
+    def _persist_last_known_agents(self, host_id: HostId, agent_refs: Sequence[DiscoveredAgent]) -> None:
+        """Persist the identity of the agents seen in a successful listing pass.
+
+        Stored as ``agent_id -> {name, certified_data}`` under the per-host
+        state dir. Best-effort: a write failure is logged, not raised --
+        discovery must not fail just because the sticky-identity cache could not
+        be refreshed. Only called with a non-empty ``agent_refs`` (a pass that
+        found real agents), so the cache is never clobbered by an empty result.
+        """
+        payload = {
+            str(ref.agent_id): {"name": str(ref.agent_name), "certified_data": dict(ref.certified_data)}
+            for ref in agent_refs
+        }
+        try:
+            atomic_write(self._last_known_agents_path(host_id), json.dumps(payload, indent=2))
+        except OSError as exc:
+            logger.warning(
+                "imbue_cloud[{}] could not persist last-known agents for host {}: {}", self.name, host_id, exc
+            )
+
+    def _load_last_known_agents(self, host_id: HostId) -> list[DiscoveredAgent]:
+        """Re-attach the last-known agents for a host, each marked stale.
+
+        Each reattached agent carries the persisted certified_data plus a
+        synthetic ``"stale": true`` key so consumers can distinguish cached
+        identity from a live listing. Returns an empty list when no cache exists
+        yet (first-ever discovery of a host), so the caller keeps its bare
+        lease-stub behavior with no change from today.
+        """
+        payload = read_json_dict(self._last_known_agents_path(host_id))
+        agents: list[DiscoveredAgent] = []
+        for agent_id_str, entry in payload.items():
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            certified = entry.get("certified_data", {})
+            if not name or not isinstance(certified, dict):
+                continue
+            agents.append(
+                DiscoveredAgent(
+                    agent_id=AgentId(agent_id_str),
+                    agent_name=AgentName(name),
+                    host_id=host_id,
+                    provider_name=self.name,
+                    certified_data={**certified, "stale": True},
+                )
+            )
+        return agents
 
     # ------------------------------------------------------------------
     # Auth helper
@@ -439,7 +508,7 @@ class ImbueCloudProvider(BaseProviderInstance):
     # (friendly name, image, tags, agents). The cached raw output is then
     # consumed by ``get_host_and_agent_details`` without another SSH.
     #
-    # Lease-only synthesis (with state=CRASHED and failure_reason carrying
+    # Lease-only synthesis (with state=UNKNOWN and failure_reason carrying
     # the underlying error) is reserved for the last-resort case where
     # even the outer SSH is unreachable -- in normal operation we expect
     # outer SSH to be reachable for every leased VPS.
@@ -461,7 +530,19 @@ class ImbueCloudProvider(BaseProviderInstance):
         no per-host reads to de-duplicate across polls.
         """
         agents_by_host = self.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
-        return bounded_result_from_agents_by_host(agents_by_host)
+        # Attach each discovered host's SSH endpoint (built from its lease) so the streaming
+        # discovery poller re-emits it as a HOST_SSH_INFO event. The lightweight streaming path
+        # does not otherwise surface SSH info, so without this a consumer that tunnels to the
+        # host (the minds system_interface forward) is starved of the endpoint and can only get
+        # it from an occasional full ``mngr list``. The leases are already cached from the
+        # discovery pass above, so this is a cheap lookup, not a second connector round-trip.
+        discovered_host_ids = {host.host_id for host in agents_by_host}
+        host_ssh_infos = [
+            (HostId(lease.host_id), self._build_lease_ssh_info(HostId(lease.host_id), lease))
+            for lease in self._list_leased_hosts_cached()
+            if HostId(lease.host_id) in discovered_host_ids
+        ]
+        return bounded_result_from_agents_by_host(agents_by_host, host_ssh_infos=host_ssh_infos)
 
     def discover_hosts_and_agents(
         self,
@@ -475,18 +556,31 @@ class ImbueCloudProvider(BaseProviderInstance):
             raw, outer_error, is_auth_failure = self._collect_listing_raw_via_outer(entry)
             if raw is None:
                 # Outer SSH itself failed; fall back to a lease-only stub
-                # so the host doesn't disappear from `mngr list`. The state
-                # depends on whether the failure was an auth mismatch (the
-                # host is reachable, our key is just wrong) or something
-                # more terminal (network down, host destroyed).
-                fallback_state = HostState.UNAUTHENTICATED if is_auth_failure else HostState.CRASHED
+                # so the host doesn't disappear from `mngr list`. An auth
+                # mismatch means the host answered (it's reachable, our key
+                # is just wrong) -> UNAUTHENTICATED. Any other failure means
+                # we could not observe the host at all -- the box may be
+                # down, or the network path from this client may be broken --
+                # so the state is UNKNOWN, not CRASHED: an unreachable host
+                # is non-evidence about the container, and consumers (e.g.
+                # the minds recovery page) must not read it as a positive
+                # "container is down" verdict.
+                fallback_state = HostState.UNAUTHENTICATED if is_auth_failure else HostState.UNKNOWN
                 host_ref = DiscoveredHost(
                     host_id=host_id,
                     host_name=HostName(entry.host_name),
                     provider_name=self.name,
                     host_state=fallback_state,
                 )
-                agent_refs = [
+                # Re-attach the full set of agents last seen on this host (each
+                # with its cached certified_data, marked stale) so the workspace
+                # keeps its labels -- and its is_primary sidebar/restart guard --
+                # through the unreachable window. Only when nothing was ever
+                # cached (first-ever discovery) do we fall back to the bare
+                # lease stub, preserving today's behavior for that case. The
+                # host state stays truthfully UNKNOWN/UNAUTHENTICATED: cached
+                # data restores identity, not liveness.
+                agent_refs = self._load_last_known_agents(host_id) or [
                     DiscoveredAgent(
                         agent_id=AgentId(entry.agent_id),
                         agent_name=AgentName(entry.agent_id),
@@ -522,26 +616,39 @@ class ImbueCloudProvider(BaseProviderInstance):
                 agent_name_str = data.get("name")
                 if not agent_id_str or not agent_name_str:
                     continue
+                # Carry the raw per-agent data (its labels, type, work_dir, etc.) as
+                # certified_data, exactly the same ``agent_raw["data"]`` the rich
+                # ``get_host_and_agent_details`` path reads. Without it these streaming
+                # refs are label-less, so any consumer that filters on labels -- e.g. the
+                # minds system_interface forward's ``--agent-include
+                # has(agent.labels.is_primary)`` -- silently drops every imbue_cloud agent.
                 agent_refs.append(
                     DiscoveredAgent(
                         agent_id=AgentId(agent_id_str),
                         agent_name=AgentName(agent_name_str),
                         host_id=host_id,
                         provider_name=self.name,
+                        certified_data=data,
                     )
                 )
-            # If the outer-SSH discovery returned no agents (e.g. container
-            # gone, or data.json is empty), still synthesize a single agent
-            # from the lease so the host shows in the listing.
-            if not agent_refs:
-                agent_refs.append(
+            if agent_refs:
+                # A real listing: refresh the sticky-identity cache so a later
+                # unreachable pass can re-attach exactly these agents.
+                self._persist_last_known_agents(host_id, agent_refs)
+            else:
+                # The outer-SSH discovery returned no agents (e.g. container
+                # gone, or data.json is empty). Re-attach the last-known agents
+                # (marked stale) if we have them, so the host keeps its labels;
+                # otherwise synthesize a single agent from the lease so the host
+                # still shows in the listing (unchanged first-discovery behavior).
+                agent_refs = self._load_last_known_agents(host_id) or [
                     DiscoveredAgent(
                         agent_id=AgentId(entry.agent_id),
                         agent_name=AgentName(entry.agent_id),
                         host_id=host_id,
                         provider_name=self.name,
                     )
-                )
+                ]
             result[host_ref] = agent_refs
         return result
 
@@ -557,7 +664,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         reached. ``is_auth_failure`` is True iff the failure was an
         authentication error (``HostAuthenticationError``) -- in that case
         the host is reachable but our key was rejected, which is the
-        ``UNAUTHENTICATED`` state, not ``CRASHED``.
+        ``UNAUTHENTICATED`` state, not ``UNKNOWN``.
         """
         host_id = HostId(lease.host_id)
         host_dir = str(self.host_dir)
@@ -618,7 +725,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         round-trip and cached the parsed data; this method just shapes it
         into the typed details structures. When the cached raw indicates
         outer SSH failed during discovery, fall back to lease-only details
-        (state=CRASHED, ssh from lease, failure_reason carrying the
+        (state=UNKNOWN, ssh from lease, failure_reason carrying the
         original error).
         """
         host_id = host_ref.host_id
@@ -723,8 +830,8 @@ class ImbueCloudProvider(BaseProviderInstance):
         populated so the user can see the unreachable address;
         ``failure_reason`` carries the underlying error. The state comes
         from ``host_ref.host_state`` (which discovery set to
-        ``UNAUTHENTICATED`` for auth failures and ``CRASHED`` for other
-        outer-SSH errors), with ``CRASHED`` as a safe default if it's
+        ``UNAUTHENTICATED`` for auth failures and ``UNKNOWN`` for other
+        outer-SSH errors), with ``UNKNOWN`` as a safe default if it's
         unset.
         """
         ssh_info = self._build_lease_ssh_info(host_ref.host_id, lease)
@@ -732,7 +839,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             id=host_ref.host_id,
             name=str(host_ref.host_name),
             provider_name=host_ref.provider_name,
-            state=host_ref.host_state or HostState.CRASHED,
+            state=host_ref.host_state or HostState.UNKNOWN,
             ssh=ssh_info,
             failure_reason=failure_message,
         )
@@ -851,7 +958,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         idle_seconds = compute_idle_seconds(user_activity, agent_activity, ssh_activity)
         expected_process_name = resolve_expected_process_name(agent_type, command, self.mngr_ctx.config)
         is_type_known = check_agent_type_known(agent_type, self.mngr_ctx.config)
-        state = determine_lifecycle_state(
+        lifecycle = determine_lifecycle_probe_result(
             tmux_info=agent_raw.get("tmux_info"),
             is_active=agent_raw.get("is_active", False),
             expected_process_name=expected_process_name,
@@ -870,7 +977,8 @@ class ImbueCloudProvider(BaseProviderInstance):
             initial_branch=agent_data.get("created_branch_name"),
             create_time=create_time,
             start_on_boot=agent_data.get("start_on_boot", False),
-            state=state,
+            state=lifecycle.state,
+            pid=lifecycle.pid,
             url=agent_raw.get("url"),
             start_time=start_time,
             runtime_seconds=runtime_seconds,
@@ -1185,7 +1293,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                 lease_result.container_host_public_key,
             )
             # The pool host's ``/mngr/data.json`` was baked with a placeholder
-            # host name; rewrite it to the user-supplied name so the FCT
+            # host name; rewrite it to the user-supplied name so the DEFAULT_WORKSPACE_TEMPLATE
             # bootstrap inherits the user's chosen workspace name.
             _rewrite_container_host_name(
                 vps_address=lease_result.vps_address,
@@ -1318,7 +1426,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         passthrough_build_args: tuple[str, ...],
         # the rebuilt container's (freshly-generated) host public key, to pin
     ) -> str:
-        """Tear down the leased VPS's baked container and rebuild it from the FCT Dockerfile.
+        """Tear down the leased VPS's baked container and rebuild it from the DEFAULT_WORKSPACE_TEMPLATE Dockerfile.
 
         Delegates both teardown and rebuild to the single canonical
         ``mngr_vps`` setup path, run over the root SSH the lease granted.
@@ -1890,6 +1998,15 @@ class ImbueCloudProvider(BaseProviderInstance):
         if leased is None:
             raise HostNotFoundError(self.name, host_id)
         return f"outer:{self.name}:{leased.vps_address}"
+
+    def get_container_loopback_ssh_port(self, host_id: HostId) -> int | None:
+        # The container is always published inside the VPS/VM on the fixed
+        # ``config.container_ssh_port``; an external client reaches it at the
+        # lease's ``container_ssh_port`` (equal for an OVH VPS, but a distinct
+        # box-forwarded port for a slice). A service running *on the outer host*
+        # (the VPS-resident latchkey gateway) must reverse-tunnel into the
+        # container on the fixed publish port, not the external one.
+        return self.config.container_ssh_port
 
     @contextmanager
     def outer_host_for(self, host_id: HostId) -> Iterator[OuterHostInterface | None]:
