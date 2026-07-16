@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Minds Pulse</title>
+<style>
+  :root {
+    --bg: #fafaf8; --surface: #ffffff; --surface-2: #f3f2ef; --hover: #edecea;
+    --text: #202020; --text-2: #666666; --faint: #8c8c8c;
+    --border: #e4e3df; --border-faint: #efeeeb;
+    --accent: #2f6b4f; --accent-hover: #24573f; --accent-light: #e9f2ee;
+    --red: #dc2626; --yellow: #ca8a04; --amber: #8a5a00;
+    /* validated light-mode categorical (token buckets) */
+    --c-cacheread: #2a78d6; --c-cachewrite: #1baf7a; --c-output: #eda100; --c-input: #e87ba4;
+    --grid: rgba(0,0,0,0.06);
+    --mono: "SF Mono", "Cascadia Code", "JetBrains Mono", ui-monospace, Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    --radius: 6px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: var(--sans); font-size: 14px; color: var(--text); background: var(--bg); -webkit-font-smoothing: antialiased; padding: 20px clamp(14px,3vw,32px) 80px; }
+  .wrap { max-width: 1120px; margin: 0 auto; }
+  .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+  /* top bar */
+  .topbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-family: var(--mono); font-size: 13px; color: var(--text-2); padding-bottom: 14px; border-bottom: 1px solid var(--border); }
+  .topbar .prompt { color: var(--accent); font-weight: 600; }
+  .topbar .title { color: var(--text); font-weight: 600; }
+  .topbar .seg { color: var(--faint); }
+  .topbar .live { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+  .dot.pulse { animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+  /* the pulse signature: one dot with a slow radiating ring — a quiet heartbeat */
+  .pulse-mark { position: relative; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); flex-shrink: 0; }
+  .pulse-mark::after { content: ""; position: absolute; inset: 0; border-radius: 50%; animation: ping 2.4s cubic-bezier(0,0,.2,1) infinite; }
+  @keyframes ping { 0% { box-shadow: 0 0 0 0 rgba(47,107,79,.38); } 70% { box-shadow: 0 0 0 9px rgba(47,107,79,0); } 100% { box-shadow: 0 0 0 0 rgba(47,107,79,0); } }
+  @media (prefers-reduced-motion: reduce) { .pulse-mark::after { animation: none; } }
+
+  /* vitals strip */
+  .vitals { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; margin: 16px 0 6px; }
+  @media (max-width: 900px) { .vitals { grid-template-columns: repeat(3,1fr);} }
+  @media (max-width: 520px) { .vitals { grid-template-columns: repeat(2,1fr);} }
+  .vital { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 11px 13px; cursor: pointer; transition: border-color 120ms, background 120ms; }
+  .vital:hover { border-color: #cfe0d7; }
+  .vital .vk { font-family: var(--mono); font-size: 10px; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); display: flex; align-items: center; gap: 5px; }
+  .vital .vv { font-family: var(--mono); font-size: 21px; font-weight: 600; margin-top: 5px; }
+  .vital .vsub { font-family: var(--mono); font-size: 10.5px; color: var(--faint); margin-top: 2px; }
+  .pdot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+  .p-ok { background: var(--accent); } .p-elevated { background: var(--yellow); } .p-high { background: var(--red); }
+
+  /* tabs */
+  .tabs { display: flex; gap: 4px; margin: 18px 0 16px; flex-wrap: wrap; border-bottom: 1px solid var(--border); }
+  .tab { font-family: var(--mono); font-size: 12.5px; color: var(--text-2); background: none; border: none; border-bottom: 2px solid transparent; padding: 8px 12px; cursor: pointer; transition: color 120ms, border-color 120ms; }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  /* generic */
+  .sec-head { display: flex; align-items: baseline; gap: 10px; margin: 22px 0 12px; }
+  .sec-head:first-child { margin-top: 4px; }
+  .sec-head .label { font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--text); }
+  .sec-head .label::before { content: "› "; color: var(--accent); }
+  .sec-head .hint { font-size: 12px; color: var(--faint); }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; }
+  .two-col { display: grid; grid-template-columns: 1.2fr 1fr; gap: 14px; }
+  @media (max-width: 860px) { .two-col { grid-template-columns: 1fr; } }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
+  .empty { color: var(--text-2); font-size: 13px; padding: 14px 2px; line-height: 1.5; }
+
+  /* stat tiles (cost) */
+  .stats { display: grid; grid-template-columns: repeat(4,1fr); gap: 12px; }
+  @media (max-width: 820px) { .stats { grid-template-columns: repeat(2,1fr);} }
+  @media (max-width: 440px) { .stats { grid-template-columns: 1fr;} }
+  .tile { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
+  .tile .k { font-family: var(--mono); font-size: 11px; color: var(--text-2); text-transform: uppercase; }
+  .tile .v { font-family: var(--mono); font-size: 26px; font-weight: 600; margin-top: 8px; }
+  .tile.primary { border-color: #cfe0d7; background: var(--accent-light); } .tile.primary .v { color: var(--accent); }
+  .tile .note { color: var(--faint); font-size: 12px; margin-top: 6px; line-height: 1.4; }
+
+  /* meters / gauges */
+  .meter { height: 10px; border-radius: 5px; background: var(--surface-2); overflow: hidden; margin: 10px 0; }
+  .meter > span { display: block; height: 100%; border-radius: 5px; background: var(--accent); transition: width 400ms; }
+  .meter.warn > span { background: var(--yellow); } .meter.crit > span { background: var(--red); }
+  .big-num { font-family: var(--mono); font-size: 30px; font-weight: 600; }
+  .big-sub { font-family: var(--mono); font-size: 12px; color: var(--text-2); }
+
+  /* bars list */
+  .barrow { padding: 8px 0; border-top: 1px solid var(--border-faint); }
+  .barrow:first-child { border-top: none; }
+  .barrow .top { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 6px; gap: 10px; }
+  .barrow .top .r { font-family: var(--mono); color: var(--text-2); white-space: nowrap; }
+  .track { height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
+  .track > span { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
+
+  /* composition */
+  .stack { display: flex; width: 100%; height: 22px; margin-bottom: 14px; gap: 2px; }
+  .stack .seg { height: 100%; border-radius: 2px; min-width: 2px; }
+  .legend { width: 100%; border-collapse: collapse; }
+  .legend td { padding: 7px 4px; font-size: 13px; border-top: 1px solid var(--border-faint); }
+  .legend tr:first-child td { border-top: none; }
+  .legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 8px; vertical-align: -1px; }
+  .legend .r { text-align: right; font-family: var(--mono); }
+  .legend .muted { color: var(--faint); }
+
+  /* charts */
+  .chart-wrap { position: relative; }
+  svg .grid line { stroke: var(--grid); stroke-width: 1; }
+  svg .axis { fill: var(--faint); font-family: var(--mono); font-size: 10px; }
+  svg .line { fill: none; stroke: var(--accent); stroke-width: 2; }
+  svg .pt { fill: var(--accent); stroke: #fff; stroke-width: 2; }
+  .tip { position: absolute; pointer-events: none; background: var(--text); color: #fff; border-radius: 5px; padding: 6px 9px; font-size: 12px; font-family: var(--mono); opacity: 0; transition: opacity 120ms; white-space: nowrap; z-index: 5; }
+
+  /* tables */
+  .tbl-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+  table.data { border-collapse: collapse; width: 100%; min-width: 640px; }
+  table.data th, table.data td { text-align: right; padding: 9px 12px; font-size: 12.5px; white-space: nowrap; }
+  table.data th { font-family: var(--mono); font-weight: 500; font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--text-2); background: var(--surface-2); border-bottom: 1px solid var(--border); }
+  table.data th.l, table.data td.l { text-align: left; }
+  table.data td { font-family: var(--mono); border-top: 1px solid var(--border-faint); }
+  table.data td.name { font-family: var(--sans); }
+  table.data tbody tr:hover { background: var(--surface-2); }
+  .ws-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+  .ws-head .name { font-family: var(--mono); font-size: 14px; font-weight: 600; } .ws-head .name::before { content: "# "; color: var(--accent); }
+  .ws-head .meta { font-family: var(--mono); font-size: 12px; color: var(--text-2); } .ws-head .meta b { color: var(--accent); }
+  .agent-name { color: var(--text); font-weight: 500; }
+  .tag { display: inline-block; font-family: var(--mono); font-size: 10px; padding: 1px 6px; border-radius: 4px; margin-left: 7px; border: 1px solid var(--border); color: var(--text-2); background: var(--surface); }
+  .tag.chat, .tag.RUNNING { color: var(--accent); border-color: #cfe0d7; background: var(--accent-light); }
+  .tag.subagent, .tag.main, .tag.api { color: var(--amber); border-color: #ecdcc0; background: #fbf4e6; }
+  .tag.EXITED, .tag.FATAL, .tag.STOPPED { color: var(--text-2); }
+  .tag.STARTING { color: var(--yellow); border-color: #ecdcc0; }
+  .cost { color: var(--accent); font-weight: 600; }
+  .raw { color: var(--faint); text-decoration: none; font-size: 11px; margin-left: 7px; border-bottom: 1px dotted var(--border); }
+  .raw:hover { color: var(--accent); border-color: var(--accent); }
+  tr.subtotal td { border-top: 1px solid var(--border); background: var(--surface-2); font-weight: 600; }
+
+  /* formula / notes / confidence */
+  .conf-box { display: flex; gap: 14px; align-items: center; padding: 12px 14px; border-radius: var(--radius); border: 1px solid var(--border); margin-bottom: 14px; }
+  .conf-box.conf--high { border-color: #cfe0d7; background: var(--accent-light); }
+  .conf-box.conf--medium { border-color: #ecdcc0; background: #fbf4e6; }
+  .conf-box.conf--low { border-color: #f3cccc; background: #fdf2f2; }
+  .conf-score { font-family: var(--mono); font-size: 30px; font-weight: 600; line-height: 1; flex-shrink: 0; }
+  .conf-box.conf--high .conf-score { color: var(--accent); } .conf-box.conf--medium .conf-score { color: var(--amber); } .conf-box.conf--low .conf-score { color: var(--red); }
+  .conf-score span { font-size: 14px; color: var(--faint); font-weight: 400; }
+  .conf-level { font-family: var(--mono); font-size: 12.5px; font-weight: 600; margin-bottom: 5px; }
+  .conf-line { font-size: 12px; color: var(--text-2); line-height: 1.45; margin-top: 2px; } .conf-line b { color: var(--text); }
+  .formula { font-family: var(--mono); font-size: 13px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; line-height: 1.7; overflow-x: auto; }
+  .formula .op { color: var(--accent); } .formula .c { color: var(--faint); }
+  .rate-note { font-size: 12px; color: var(--text-2); margin-top: 10px; line-height: 1.5; }
+  .notes { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
+  @media (max-width: 720px) { .notes { grid-template-columns: 1fr; } }
+  .note { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 13px 15px; font-size: 12.5px; line-height: 1.5; color: var(--text-2); }
+  .note h3 { font-family: var(--mono); font-size: 12px; color: var(--text); margin-bottom: 5px; }
+  .note.warn { border-color: #ecdcc0; background: #fdfaf3; } .note.warn h3 { color: var(--amber); } .note b { color: var(--text); }
+  .foot { font-family: var(--mono); color: var(--faint); font-size: 11px; margin-top: 22px; text-align: center; }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <span class="pulse-mark" aria-hidden="true"></span><span class="title">minds-pulse</span>
+      <span class="seg" id="scope">— host: …</span>
+      <span class="live"><span id="updated">live</span></span>
+    </div>
+
+    <div class="vitals" id="vitals"></div>
+
+    <div class="tabs" id="tabs">
+      <button class="tab active" data-panel="cost">Cost</button>
+      <button class="tab" data-panel="memory">Memory</button>
+      <button class="tab" data-panel="compute">Compute</button>
+      <button class="tab" data-panel="storage">Storage</button>
+      <button class="tab" data-panel="services">Services &amp; agents</button>
+    </div>
+
+    <div class="panel active" id="panel-cost">
+      <div class="stats" id="stats"></div>
+      <div class="sec-head"><span class="label">where the money goes</span><span class="hint">cost by token type</span></div>
+      <div class="card"><div class="stack" id="stack"></div><table class="legend" id="legend"></table></div>
+      <div class="sec-head"><span class="label">spend &amp; models</span></div>
+      <div class="two-col">
+        <div class="card"><div class="chart-wrap" id="ts"></div></div>
+        <div class="card" id="models"></div>
+      </div>
+      <div class="sec-head"><span class="label">agents &amp; workspaces</span><span class="hint">every agent, grouped by workspace</span></div>
+      <div id="workspaces"></div>
+      <div class="sec-head"><span class="label">how cost is computed</span><span class="hint">the exact math</span></div>
+      <div class="card" id="pricing"></div>
+      <div class="notes" id="notes"></div>
+    </div>
+
+    <div class="panel" id="panel-memory"></div>
+    <div class="panel" id="panel-compute"></div>
+    <div class="panel" id="panel-storage"></div>
+    <div class="panel" id="panel-services"></div>
+
+    <div class="foot" id="foot"></div>
+  </div>
+
+<script>
+  const CUR = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+  const BUCKETS = [
+    { key: 'cache_read', label: 'Cache read', color: 'var(--c-cacheread)' },
+    { key: 'cache_creation', label: 'Cache write', color: 'var(--c-cachewrite)' },
+    { key: 'output', label: 'Output', color: 'var(--c-output)' },
+    { key: 'input', label: 'Input', color: 'var(--c-input)' },
+  ];
+  const usd = (n) => n == null ? '—' : (Math.abs(n) >= 0.01 || n === 0 ? CUR.format(n) : '$' + n.toFixed(4));
+  const toks = (n) => n == null ? '—' : n>=1e9?(n/1e9).toFixed(2)+'B':n>=1e6?(n/1e6).toFixed(2)+'M':n>=1e3?(n/1e3).toFixed(1)+'K':String(n);
+  const bytes = (n) => n==null?'—':n>=1073741824?(n/1073741824).toFixed(1)+' GB':n>=1048576?(n/1048576).toFixed(0)+' MB':n>=1024?(n/1024).toFixed(0)+' KB':n+' B';
+  const pct = (p,w) => w>0?p/w*100:0;
+  const esc = (s) => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const meterCls = (p) => p>=85?'meter crit':p>=65?'meter warn':'meter';
+
+  function sparkline(vals, w, h, color) {
+    if (!vals || vals.length < 2) return `<div class="empty" style="padding:8px 2px">Collecting… graph fills in as it samples.</div>`;
+    const max = Math.max(...vals, 1), min = 0;
+    const xs = (i)=> (w) * (i/(vals.length-1));
+    const ys = (v)=> h - (h-4) * ((v-min)/(max-min||1)) - 2;
+    const line = vals.map((v,i)=>`${xs(i).toFixed(1)},${ys(v).toFixed(1)}`).join(' ');
+    return `<svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}" preserveAspectRatio="none">
+      <polyline fill="none" stroke="${color}" stroke-width="1.5" points="${line}"/></svg>`;
+  }
+
+  /* ---------- vitals ---------- */
+  function renderVitals(cost, sys) {
+    const el = document.getElementById('vitals');
+    if (!sys && !cost) return;
+    const items = [];
+    if (sys) {
+      const c = sys.cpu, m = sys.memory, d = sys.disk;
+      const up = sys.services.filter(s=>s.state==='RUNNING').length;
+      const tot = sys.services.filter(s=>s.state!=='EXITED').length;
+      items.push({panel:'compute', k:'CPU load', v:c.load1_per_core.toFixed(2), sub:`${c.load1} on ${c.cores} cores`});
+      items.push({panel:'memory', k:`<span class="pdot p-${m.pressure}"></span>Memory`, v:m.percent+'%', sub:`${bytes(m.available)} free`});
+      items.push({panel:'storage', k:'Disk', v:d.percent+'%', sub:`${bytes(d.free)} free`});
+      items.push({panel:'services', k:'Services', v:`${up}/${tot}`, sub:'running'});
+      items.push({panel:'services', k:'Agents', v:String(sys.agents.count), sub:'on this host'});
+    }
+    if (cost) items.push({panel:'cost', k:'Spend', v:usd(cost.totals.estimated_equivalent_usd), sub:'API-equivalent'});
+    el.innerHTML = items.map(x=>`<div class="vital" data-panel="${x.panel}"><div class="vk">${x.k}</div><div class="vv">${x.v}</div><div class="vsub">${x.sub}</div></div>`).join('');
+    el.querySelectorAll('.vital').forEach(v=>v.addEventListener('click',()=>selectPanel(v.dataset.panel)));
+  }
+
+  /* ---------- cost panel (unchanged logic) ---------- */
+  function renderCost(d) {
+    const t = d.totals;
+    document.getElementById('stats').innerHTML = [
+      {cls:'tile primary',k:'API-equivalent value',v:usd(t.estimated_equivalent_usd),note:'All usage at API rates. Mostly subscription — consumption value, not a bill.'},
+      {cls:'tile',k:'Billed API spend',v:usd(t.billed_api_usd),note:d.api_key_present?'Metered pay-per-token (API key present).':'Metered pay-per-token. None yet.'},
+      {cls:'tile',k:'30-day at this pace',v:usd(d.projection.projected_30d_usd),note:(d.projection.provisional?`Provisional — only ${d.projection.basis_days} day${d.projection.basis_days===1?'':'s'} of mostly build activity. `:``)+`If recent agent-work pace holds (${usd(d.projection.daily_avg_usd)}/day). Not a fixed bill.`},
+      {cls:'tile',k:'Tokens · turns',v:toks(t.tokens.total),note:`${t.turns.toLocaleString()} turns · ${t.agent_count} agents.`},
+    ].map(x=>`<div class="${x.cls}"><div class="k">${x.k}</div><div class="v">${x.v}</div><div class="note">${x.note}</div></div>`).join('');
+
+    const bb=d.by_bucket||{}, total=BUCKETS.reduce((s,b)=>s+((bb[b.key]||{}).cost_usd||0),0);
+    document.getElementById('stack').innerHTML = total<=0?'':BUCKETS.map(b=>{const c=(bb[b.key]||{}).cost_usd||0,w=pct(c,total);return w>0?`<div class="seg" style="width:${w}%;background:${b.color}"></div>`:'';}).join('');
+    document.getElementById('legend').innerHTML = total<=0?'<tr><td class="empty">No priced usage yet.</td></tr>':BUCKETS.map(b=>{const c=(bb[b.key]||{}).cost_usd||0,tk=(bb[b.key]||{}).tokens||0;return `<tr><td><span class="sw" style="background:${b.color}"></span>${b.label} <span class="muted">${toks(tk)} tokens</span></td><td class="r">${usd(c)}</td><td class="r muted">${pct(c,total).toFixed(0)}%</td></tr>`;}).join('');
+
+    renderCostTimeseries(d);
+    const models=d.by_model||[], mmax=Math.max(...models.map(m=>m.cost_usd||0),0.0001);
+    document.getElementById('models').innerHTML = models.length?models.map(m=>`<div class="barrow"><div class="top"><span>${esc(m.model)}${m.priced?'':' <span class="tag">unpriced</span>'}</span><span class="r cost">${usd(m.cost_usd)}</span></div><div class="track"><span style="width:${pct(m.cost_usd||0,mmax)}%"></span></div><div class="vsub" style="margin-top:5px">${toks(m.tokens.total)} tokens · ${m.turns} turns</div></div>`).join(''):'<div class="empty">No usage yet.</div>';
+
+    renderWorkspaces(d);
+    renderPricing(d);
+    const notes=[];
+    notes.push(`<div class="note"><h3>build vs. run</h3>Spend is almost all <b>live agent work</b> (building and chatting) — front-loaded while you build, then it falls off. The apps you build, including this one, make <b>no model calls</b>, so running them costs <b>~$0</b>. So the 30-day figure tracks how much you keep working with agents, not a bill for keeping the workspace on.</div>`);
+    notes.push(`<div class="note"><h3>two ways to read the dollars</h3><b>API-equivalent value</b> prices every token at API rates. Interactive agents run on the Claude <b>subscription</b> pool, so that figure is an estimate, not an invoice. <b>Billed API spend</b> counts only metered pay-per-token calls.</div>`);
+    (d.gaps||[]).forEach(g=>notes.push(`<div class="note warn"><h3>coverage gap</h3>${esc(g)}</div>`));
+    document.getElementById('notes').innerHTML = notes.join('');
+  }
+  function renderCostTimeseries(d) {
+    const wrap=document.getElementById('ts'), data=(d.timeseries)||[];
+    if (data.length<2){const o=data[0];wrap.innerHTML=`<div class="empty">Daily history is still building.${o?` So far: <b>${usd(o.cost_usd)}</b> over ${toks(o.tokens_total)} tokens on ${o.date}.`:''}</div>`;return;}
+    const W=wrap.clientWidth||480,H=190,P={t:12,r:12,b:22,l:52};
+    const xs=(i)=>P.l+(W-P.l-P.r)*(i/(data.length-1)),maxV=Math.max(...data.map(p=>p.cost_usd),0.0001),ys=(v)=>H-P.b-(H-P.t-P.b)*(v/maxV);
+    const grid=[0,.5,1].map(f=>{const v=maxV*f;return `<line x1="${P.l}" y1="${ys(v)}" x2="${W-P.r}" y2="${ys(v)}"/><text class="axis" x="${P.l-6}" y="${ys(v)+3}" text-anchor="end">${usd(v)}</text>`;}).join('');
+    const line=data.map((p,i)=>`${xs(i)},${ys(p.cost_usd)}`).join(' ');
+    wrap.innerHTML=`<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}"><g class="grid">${grid}</g><polyline class="line" points="${line}"/>${data.map((p,i)=>`<circle class="pt" cx="${xs(i)}" cy="${ys(p.cost_usd)}" r="3.5"/>`).join('')}</svg>`;
+  }
+  function tagKind(k){const kk=['chat','subagent','main'].includes(k)?k:'';return `<span class="tag ${kk}">${k}</span>`;}
+  function renderWorkspaces(d) {
+    const total=d.totals.estimated_equivalent_usd, cols=['Type','Cost','Turns','Input','Output','Cache rd','Cache wr','Tokens'];
+    document.getElementById('workspaces').innerHTML=d.workspaces.map(ws=>{
+      const rows=ws.agents.map(a=>{const share=pct(a.cost_usd,total);return `<tr><td class="l name"><span class="agent-name">${esc(a.name)}</span>${tagKind(a.kind)}<a class="raw" href="api/raw?path=${encodeURIComponent(a.transcript_path)}" target="_blank" rel="noopener">raw</a></td><td class="l">${a.billed_api?'<span class="tag api">billed API</span>':'<span class="tag">subscription</span>'}</td><td class="cost">${usd(a.cost_usd)} <span style="color:var(--faint);font-weight:400">${share.toFixed(0)}%</span></td><td>${a.turns}</td><td>${toks(a.tokens.input)}</td><td>${toks(a.tokens.output)}</td><td>${toks(a.tokens.cache_read)}</td><td>${toks(a.tokens.cache_creation)}</td><td>${toks(a.tokens.total)}</td></tr>`;}).join('');
+      const st=ws.tokens;
+      return `<div style="margin-bottom:18px"><div class="ws-head"><span class="name">${esc(ws.workspace)}</span><span class="meta"><b>${usd(ws.cost_usd)}</b> · ${ws.agent_count} agents · ${toks(st.total)} tokens</span></div><div class="tbl-scroll"><table class="data"><thead><tr><th class="l">Agent</th>${cols.map(c=>`<th class="${c==='Type'?'l':''}">${c}</th>`).join('')}</tr></thead><tbody>${rows}<tr class="subtotal"><td class="l">Subtotal</td><td></td><td class="cost">${usd(ws.cost_usd)}</td><td>${ws.agents.reduce((s,a)=>s+a.turns,0)}</td><td>${toks(st.input)}</td><td>${toks(st.output)}</td><td>${toks(st.cache_read)}</td><td>${toks(st.cache_creation)}</td><td>${toks(st.total)}</td></tr></tbody></table></div></div>`;
+    }).join('');
+  }
+  function renderPricing(d) {
+    const p=d.pricing, c=d.confidence; if(!p){document.getElementById('pricing').innerHTML='';return;}
+    const rateRows=p.rates.map(r=>r.priced?`<tr><td class="l name">${esc(r.model)}</td><td>$${r.input_per_mtok}</td><td>$${r.output_per_mtok}</td><td>$${r.cache_write_5m_per_mtok}</td><td>$${r.cache_write_1h_per_mtok}</td><td>$${r.cache_read_per_mtok}</td></tr>`:`<tr><td class="l name">${esc(r.model)}</td><td colspan="5" class="l" style="color:var(--faint)">unpriced</td></tr>`).join('');
+    const conf=c?`<div class="conf-box conf--${c.level.toLowerCase()}"><div class="conf-score">${c.score}<span>/100</span></div><div><div class="conf-level">Confidence: ${c.level} · ${c.priced_token_pct}% of tokens priced</div><div class="conf-line"><b>Exact:</b> ${esc(c.exact)}</div><div class="conf-line"><b>Estimated:</b> ${esc(c.estimated)}</div></div></div>`:'';
+    document.getElementById('pricing').innerHTML=`${conf}<div class="formula"><span class="c"># per-agent cost (cache-write split by TTL)</span><br>cost <span class="op">=</span> input <span class="op">×</span> rate_in <span class="op">+</span> cache_read <span class="op">×</span> rate_cr <span class="op">+</span> cache_write_5m <span class="op">×</span> rate_cw5m <span class="op">+</span> cache_write_1h <span class="op">×</span> rate_cw1h <span class="op">+</span> output <span class="op">×</span> rate_out</div><div style="margin-top:14px" class="tbl-scroll"><table class="data"><thead><tr><th class="l">Model</th><th>Input /Mtok</th><th>Output /Mtok</th><th>Cache&nbsp;wr 5m</th><th>Cache&nbsp;wr 1h</th><th>Cache read</th></tr></thead><tbody>${rateRows}</tbody></table></div><div class="rate-note">${esc(p.source)}</div>`;
+  }
+
+  /* ---------- memory panel ---------- */
+  function renderMemory(s) {
+    const m=s.memory, hist=s.history.map(h=>h.mem);
+    const procs=s.processes.by_memory, pmax=Math.max(...procs.map(p=>p.rss),1);
+    const oom=s.oom;
+    const oomHtml = oom.count===0
+      ? `<div class="empty">No processes have been shed. Memory is healthy — nothing killed under pressure.</div>`
+      : `<div class="tbl-scroll"><table class="data"><thead><tr><th class="l">When</th><th class="l">Process</th><th>PID</th><th class="l">Agent</th></tr></thead><tbody>${oom.recent.map(e=>`<tr><td class="l">${esc((e.timestamp||'').slice(0,19).replace('T',' '))}</td><td class="l name">${esc(e.comm||'?')}</td><td>${e.pid??'—'}</td><td class="l">${esc(e.agent_name||'—')}${e.is_worker?' <span class="tag">worker</span>':''}</td></tr>`).join('')}</tbody></table></div>`;
+    document.getElementById('panel-memory').innerHTML = `
+      <div class="grid2">
+        <div class="card"><div class="vsub">Memory in use</div><div class="big-num">${m.percent}%</div>
+          <div class="${meterCls(m.percent)}"><span style="width:${m.percent}%"></span></div>
+          <div class="big-sub">${bytes(m.used)} used · ${bytes(m.available)} free of ${bytes(m.total)} · pressure <b style="color:${m.pressure==='ok'?'var(--accent)':m.pressure==='elevated'?'var(--yellow)':'var(--red)'}">${m.pressure}</b></div>
+          <div style="margin-top:14px">${sparkline(hist,300,54,'#2f6b4f')}</div>
+        </div>
+        <div class="card"><div class="vsub" style="margin-bottom:6px">Top processes by memory</div>
+          ${procs.map(p=>`<div class="barrow"><div class="top"><span>${esc(p.name)} <span class="muted mono" style="color:var(--faint)">${p.pid}</span></span><span class="r">${bytes(p.rss)}</span></div><div class="track"><span style="width:${pct(p.rss,pmax)}%"></span></div></div>`).join('')}
+        </div>
+      </div>
+      <div class="sec-head"><span class="label">memory pressure &amp; OOM shed log</span><span class="hint">processes the kernel killed under pressure</span></div>
+      <div class="card">${oomHtml}
+        <div class="rate-note">In a small container Minds sheds the most-expendable process first (a build/test/browser subprocess before an agent). An exit-137 in your chat usually shows up here.</div>
+      </div>`;
+  }
+
+  /* ---------- compute panel ---------- */
+  function renderCompute(s) {
+    const c=s.cpu, hist=s.history.map(h=>h.cpu);
+    const procs=s.processes.by_cpu, pmax=Math.max(...procs.map(p=>p.cpu),1);
+    const loadPct=Math.min(c.load1_per_core*100,100);
+    document.getElementById('panel-compute').innerHTML = `
+      <div class="grid2">
+        <div class="card"><div class="vsub">Load per core</div><div class="big-num">${c.load1_per_core.toFixed(2)}</div>
+          <div class="${meterCls(loadPct)}"><span style="width:${loadPct}%"></span></div>
+          <div class="big-sub">load ${c.load1} / ${c.load5} / ${c.load15} (1·5·15 min) on ${c.cores} cores · CPU ${c.percent}%</div>
+          <div style="margin-top:14px">${sparkline(hist,300,54,'#2f6b4f')}</div>
+        </div>
+        <div class="card"><div class="vsub" style="margin-bottom:6px">Top processes by CPU</div>
+          ${procs.some(p=>p.cpu>0)?procs.map(p=>`<div class="barrow"><div class="top"><span>${esc(p.name)} <span style="color:var(--faint)">${p.pid}</span></span><span class="r">${p.cpu}%</span></div><div class="track"><span style="width:${pct(p.cpu,pmax)}%"></span></div></div>`).join(''):'<div class="empty">CPU per-process fills in after a couple of samples.</div>'}
+        </div>
+      </div>`;
+  }
+
+  /* ---------- storage panel ---------- */
+  function renderStorage(s) {
+    const d=s.disk, bmax=Math.max(...(d.breakdown.map(b=>b.bytes)),1);
+    document.getElementById('panel-storage').innerHTML = `
+      <div class="grid2">
+        <div class="card"><div class="vsub">Disk in use</div><div class="big-num">${d.percent}%</div>
+          <div class="${meterCls(d.percent)}"><span style="width:${d.percent}%"></span></div>
+          <div class="big-sub">${bytes(d.used)} used · ${bytes(d.free)} free of ${bytes(d.total)}</div>
+        </div>
+        <div class="card"><div class="vsub" style="margin-bottom:6px">What's using space</div>
+          ${d.breakdown.length?d.breakdown.map(b=>`<div class="barrow"><div class="top"><span>${esc(b.label)}</span><span class="r">${bytes(b.bytes)}</span></div><div class="track"><span style="width:${pct(b.bytes,bmax)}%"></span></div></div>`).join(''):'<div class="empty">No sized directories.</div>'}
+        </div>
+      </div>
+      <div class="note" style="margin-top:14px"><h3>note</h3>Agent transcripts and git history grow over time; the transcripts are the same data the cost view reads. Directory sizes refresh about once a minute.</div>`;
+  }
+
+  /* ---------- services & agents panel ---------- */
+  function renderServices(s) {
+    const svc=s.services.map(x=>`<tr><td class="l name">${esc(x.name)}</td><td class="l"><span class="tag ${x.state}">${x.state}</span></td><td>${x.uptime||'—'}</td><td>${x.cpu==null?'—':x.cpu+'%'}</td><td>${x.rss==null?'—':bytes(x.rss)}</td></tr>`).join('');
+    const ag=s.agents.agents.map(a=>`<tr><td class="l name"><span class="agent-name">${esc(a.name)}</span></td><td class="l">${tagKind(a.type==='claude'?'chat':a.type)}</td><td class="l">${esc(a.project||'—')}</td></tr>`).join('');
+    document.getElementById('panel-services').innerHTML = `
+      <div class="sec-head"><span class="label">services</span><span class="hint">supervisord processes with live CPU &amp; memory</span></div>
+      <div class="tbl-scroll"><table class="data"><thead><tr><th class="l">Service</th><th class="l">State</th><th>Uptime</th><th>CPU</th><th>Memory</th></tr></thead><tbody>${svc}</tbody></table></div>
+      <div class="sec-head"><span class="label">agents</span><span class="hint">agents on this host</span></div>
+      <div class="tbl-scroll"><table class="data"><thead><tr><th class="l">Agent</th><th class="l">Type</th><th class="l">Project</th></tr></thead><tbody>${ag}</tbody></table></div>`;
+  }
+
+  /* ---------- tabs ---------- */
+  let activePanel = 'cost';
+  function selectPanel(name) {
+    activePanel = name;
+    document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active', t.dataset.panel===name));
+    document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('active', p.id==='panel-'+name));
+    if (lastCost) renderCostTimeseries(lastCost);
+  }
+  document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>selectPanel(t.dataset.panel)));
+
+  const timeAgo=(iso)=>{const s=Math.max(0,(Date.now()-new Date(iso).getTime())/1000);return s<60?`updated ${Math.round(s)}s ago`:`updated ${Math.round(s/60)}m ago`;};
+
+  let lastCost=null, lastSys=null, lastGen=null;
+  async function load() {
+    try {
+      const [cost, sys] = await Promise.all([
+        fetch('api/snapshot',{cache:'no-store'}).then(r=>r.json()),
+        fetch('api/system',{cache:'no-store'}).then(r=>r.json()),
+      ]);
+      lastCost=cost; lastSys=sys; lastGen=cost.generated_at;
+      document.getElementById('scope').textContent = `— host: ${(sys.host&&sys.host.host_name)||(cost.host&&cost.host.host_name)||'this host'}`;
+      renderVitals(cost, sys);
+      renderCost(cost); renderMemory(sys); renderCompute(sys); renderStorage(sys); renderServices(sys);
+      document.getElementById('foot').textContent = `cost priced from live transcripts · system sampled live · ${cost.generated_at.slice(0,19).replace('T',' ')} UTC`;
+    } catch(e) { document.getElementById('updated').textContent='reconnecting…'; }
+  }
+  load();
+  setInterval(load, 5000);
+  setInterval(()=>{ if(lastGen) document.getElementById('updated').textContent=timeAgo(lastGen); }, 1000);
+  window.addEventListener('resize', ()=>{ if(lastCost) renderCostTimeseries(lastCost); });
+</script>
+</body>
+</html>
