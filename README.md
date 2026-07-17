@@ -1,65 +1,59 @@
 # Minds Pulse
 
-*A host-wide monitor for a [Minds](https://minds.com) workspace — what your AI is costing you, and what your machine is doing, in one live dashboard.*
+A monitor for your Minds workspace. It shows what your AI is costing you and what your machine is doing, live, in one dashboard.
 
-Minds Pulse answers a simple question that turns out to be surprisingly hard: **"how much is this actually costing me, and is that number even right?"** It runs as a web tab inside your Minds workspace and, in near real time, shows:
+![The Minds Pulse dashboard running on example data](docs/screenshot.png)
 
-- **Cost** — live AI spend, broken down per agent and per workspace, priced straight from each agent's transcripts. It shows the *formula* and a *confidence score*, not just a dollar figure.
-- **Memory** — usage, pressure, top processes, and the OOM shed log (what the kernel killed under pressure — the usual cause of a mysterious crash).
-- **Compute** — load per core, CPU over time, top processes.
-- **Storage** — disk usage and what's actually growing (transcripts, git history, …).
-- **Services & agents** — every background service with live CPU/RAM, plus the agent roster.
+*The Cost view, shown with example data.*
 
-A permanent **vitals strip** across the top gives you the one-glance summary; the depth lives behind tabs so it stays uncluttered.
+## 📊 What it shows
 
-Everything is **local and read-only**: Minds Pulse makes no external or LLM calls and needs no credentials. It just reads files on the host and samples the process table.
+Minds Pulse runs as a tab inside your Minds workspace. A strip across the top gives you the one-glance vitals. Everything else sits behind tabs so it stays clean.
 
----
+- **Cost.** Live AI spend, split per agent and per workspace, priced straight from each agent's transcripts. You see the formula and a confidence score, not only a dollar figure.
+- **Memory.** Usage, pressure, the heaviest processes, and the OOM log (what got killed when memory ran low, which is the usual reason something crashes).
+- **Compute.** Load per core, CPU over time, and the top processes.
+- **Storage.** Disk usage, and what is actually growing.
+- **Services and agents.** Every background service with live CPU and memory, plus the agents running on the host.
 
-## The thinking behind it
+It reads local files and samples the process table. No external calls, no LLM calls, no credentials.
 
-This started as a plain request — *"track my AI usage across Minds and predict what it's costing me, in real time."* Getting to a number you can trust took a few turns of thought, and those turns are baked into the design:
+## 🧠 Why it looks the way it does
 
-**1. The data already existed.** Every Minds agent writes a Claude Code transcript that records exact per-message token usage. So this isn't sampling or estimating usage — it reads the real counts and prices them with the same rate table Minds itself bills against. The dashboard surfaces those transcripts as the source, so nothing is a black box.
+This began as a plain ask. "Track my AI usage across Minds and tell me what it costs, in real time." Getting to a number worth trusting took a few decisions, and those shaped the whole design.
 
-**2. Accuracy had to be earned, not assumed.** An early version quietly *undercounted* by ~7% because it priced all prompt-cache writes at the cheap 5-minute rate, when 1-hour cache writes cost double. That's fixed — cache writes are now split by TTL and priced correctly. To keep the numbers honest going forward, the dashboard shows a **confidence score** and states plainly what is *measured* (the tokens) versus *estimated* (their dollar value).
+**The data was already there.** Every Minds agent writes a transcript with exact token counts per message. So Minds Pulse reads the real numbers and prices them with the same rate table Minds bills against. Nothing is guessed.
 
-**3. "Cost" needed honest framing.** Most Minds usage runs on a subscription, so the dollar figure is **API-equivalent value** — *what you're consuming*, not a bill. Billed pay-per-token spend is tracked separately. The dashboard says which is which, so a big number is never mistaken for an invoice.
+**Accuracy had to be checked, not assumed.** An early version undercounted by about 7 percent, because it priced every prompt-cache write at the cheap 5-minute rate when 1-hour writes cost double. That is fixed now. The dashboard also shows a confidence score, and it says plainly what is measured (the tokens) versus what is estimated (their dollar value).
 
-**4. The scariest number was the most misleading.** A naive "30-day projection" extrapolates today's spend across a month — but building something in Minds is **front-loaded**: the expensive part is the agent work of *creating* a tool, while *running* what you built costs ~$0 (the apps make no model calls). So the projection is framed as a *provisional pace* with a **"build vs. run"** explanation, not a fixed monthly bill.
+**A dollar figure needs honest framing.** Most Minds work runs on a subscription, so the number is what you are consuming at API rates, not a bill. Metered pay-per-token spend is tracked on its own. The dashboard labels which is which, so a big number is never read as an invoice.
 
-**5. Cost alone wasn't the whole picture.** A Minds workspace is a small container where **memory is the real constraint** — and Minds will shed (kill) processes under memory pressure. So the tool grew from a cost tracker into a full monitor (hence *Pulse*), modeled on macOS Activity Monitor but kept deliberately uncluttered: one always-on vitals strip, everything else one tab away.
+**The scary projection was the misleading one.** A plain 30-day forecast stretches today's spend across a month. But building something in Minds is front-loaded. The expensive part is the agent work of creating a tool. Running what you built costs almost nothing, because the finished apps make no model calls. So the projection reads as a provisional pace with a short "build versus run" note, not a fixed monthly bill.
 
-**6. It should feel like part of Minds.** The design uses the native Minds palette and type, a terminal-but-friendly texture, and a single quiet "pulse" mark as its identity — comprehensive views without the clutter.
+**Cost was only half the story.** A Minds workspace is a small box where memory is the tight resource, and Minds will kill a process when memory runs low. So the tool grew from a cost tracker into a full monitor, which is where the name comes from. It borrows the shape of macOS Activity Monitor but stays quiet on screen. One vitals strip is always up, and the depth is one tab away.
 
-The durable principles, if you adapt this: **show the math, not just the number; separate measured from estimated; frame cost as a pace, not a bill; and stay comprehensive without becoming cluttered.**
+If you adapt this, the ideas worth keeping are simple. Show the math, not only the number. Separate what is measured from what is estimated. Treat cost as a pace, not a bill. Stay thorough without getting noisy.
 
----
+## ⚙️ How it works
 
-## How it works
+- `libs/minds_pulse/collector.py` reads agent transcripts, groups usage by session (sub-agents included), and prices it with `pricing.py`.
+- `libs/minds_pulse/system_monitor.py` samples CPU, memory, disk, services, and the OOM log fresh on each request, keeping a short history for the graphs.
+- `libs/minds_pulse/runner.py` is a small Flask app that serves the dashboard and its data. The whole interface is one `assets/index.html`.
 
-- `libs/minds_pulse/collector.py` reads agent transcripts under the host dir, attributes usage by session id (sub-agents included), and prices it with `pricing.py` (rates mirrored from Minds' billing table).
-- `libs/minds_pulse/system_monitor.py` samples CPU/memory/disk via `psutil`, services via `supervisorctl`, and the OOM shed ledger — fresh on each request, with a short rolling history for the graphs.
-- `libs/minds_pulse/runner.py` is a small Flask app serving the dashboard and its JSON endpoints; the whole UI is a single `assets/index.html`.
+## 🚀 Use it
 
----
+- **Start a new mind from it.** Point a new Minds workspace at this repo's URL. On first boot the mind reads the inspiration and helps you adapt it.
+- **Add it to a mind you already have.** Run `/use-inspiration <this repo's URL>`.
 
-## Use it
+## 📦 What's inside
 
-- **Create a new mind from it:** point a new Minds workspace at this repo's URL. On first boot the mind reads the inspiration and helps you adapt it.
-- **Bring it into an existing mind:** run `/use-inspiration <this repo's URL>`.
+- **Minds Pulse**, with the full write-up in [`inspiration-minds-pulse.md`](inspiration-minds-pulse.md). That file covers what it is, how it works, what it needs (nothing, no credentials), and how to adapt it.
 
-## What's inside
+This repo is a published Minds inspiration, a clean and bootable copy of a feature a mind built, ready to adapt into your own. It is not the generic workspace template. It is this one project.
 
-- **Minds Pulse** — [`inspiration-minds-pulse.md`](inspiration-minds-pulse.md) — the full manifest: what it is, how it works, prerequisites (none — it needs no credentials), and notes for adapting it.
+## ⚠️ Good to know
 
-This repository is a published **minds inspiration**: a clean, bootable snapshot of a feature a mind built, ready to adapt into your own. It is not the generic workspace template — it is this specific project.
-
----
-
-## Honest limitations
-
-- **Rates can drift.** Pricing is mirrored from Minds' billing table as of publish; re-sync if prices change.
-- **Direct-API spend isn't captured yet.** Anything that calls a metered pay-per-token API (e.g. browser automation) isn't yet folded into "billed API spend."
-- **The projection is provisional early on.** With only a day or two of history it can't tell a build sprint from steady-state use; it says so.
-- **Per-process → agent attribution is heuristic.** Agents share a process tree, so the system panels attribute best-effort.
+- Prices are copied from the Minds billing table as of publish, so re-sync them if rates change.
+- Spend from a metered pay-per-token API, for example browser automation, is not folded into billed spend yet.
+- With only a day or two of history, the projection cannot tell a build sprint from steady use, and it says so.
+- Agents share a process tree, so the per-agent CPU and memory reads are best effort.
